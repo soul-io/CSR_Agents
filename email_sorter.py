@@ -1,117 +1,160 @@
-from crewai.tools import BaseTool
-from pydantic import Field, BaseModel
-import json
+from airtable_logger import log_email_to_airtable
+import os
+import re
+import time
+from graph_helper import (
+    get_folder_id,
+    get_unread_emails,
+    move_email,
+    get_email_attachments
+)
 
-# Imports
-from graph_helper import get_email_details as fetch_real_email_details
-from email_request import send_email_update
-from email_sorter import process_emails  # This must be defined in email_sorter.py
+# --- Configuration ---
+FOLDER_NEEDS_ATTENTION = "Needs Attention"
+FOLDER_QUOTE_REQUESTS = "Quote Requests"
+FOLDER_PURCHASE_ORDERS = "Purchase Orders"
 
+PO_SUBJECT_BODY_KEYWORDS = ["purchase order", "po", r"p\.o\."]
+PO_NUMBER_PATTERNS = [
+    r"p[./]?o\s*(?:number|no\.?|#|num)?\s*:?-?\s*\d+",
+    r"purchase order\s*(?:number|no\.?|#|num)?\s*:?-?\s*\d+",
+    r"\b\d{6,10}\b"
+]
+PO_ATTACHMENT_NAME_KEYWORDS = ["po", "purchaseorder", "order", "purch"]
+QUOTE_SUBJECT_BODY_KEYWORDS = [
+    "quote", "request for quote", "rfq", "pricing", "lead time", "estimate", "ship time"
+]
+SPEC_SHEET_ATTACHMENT_KEYWORDS = ["spec", "specification", "datasheet", "drawing"]
 
-# --- Email Sorting Tool ---
+def detect_purchase_order_signals(subject, body, attachments):
+    score = 0
+    subject = subject.lower()
+    body = body.lower()
+    filenames = [a['name'].lower() for a in attachments]
 
-class EmailSorterToolSchema(BaseModel):
-    pass  # No args needed
+    if any(name.endswith(".pdf") for name in filenames):
+        score += 1
+    if "po#" in body or "purchase order" in body or len(re.findall(r"\bpo\s?[0-9]{4,10}\b", body)) > 0:
+        score += 1
+    if any("po" in name or re.search(r"\d{4,}", name) for name in filenames):
+        score += 1
 
+    return score >= 2
 
-class EmailSorterTool(BaseTool):
-    name: str = "Email Sorting Tool"
-    description: str = "Sorts and categorizes unread Outlook emails using Microsoft Graph. No arguments required."
-    args_schema: type[BaseModel] = EmailSorterToolSchema
+def categorize_email(email_data, attachments):
+    subject_original = email_data.get('subject', '')
+    subject_lower = subject_original.lower()
 
-    def _run(self) -> str:
-        print(f"[{self.name}] Starting tool execution.")
-        results = process_emails()
-        if results is None:
-            return "❌ Email sorting failed due to a critical setup error."
-        elif not results:
-            return "✅ Email sorting complete. No unread emails found."
+    body_content_data = email_data.get('body', {})
+    body_content = body_content_data.get('content', '').lower() if body_content_data else ''
+    if not body_content:
+        body_content = email_data.get('bodyPreview', '').lower()
+
+    has_attachments_flag = email_data.get('hasAttachments', False)
+    content_to_search = subject_lower + " " + body_content
+
+    is_po_pdf_present = False
+    is_any_spec_sheet_present = False
+
+    if has_attachments_flag and attachments:
+        for att in attachments:
+            att_name = att.get('name', '').lower()
+            if any(spec in att_name for spec in SPEC_SHEET_ATTACHMENT_KEYWORDS):
+                is_any_spec_sheet_present = True
+
+    if has_attachments_flag and attachments:
+        for att in attachments:
+            att_name = att.get('name', '').lower()
+            att_type = att.get('contentType', '').lower()
+            if att_type == 'application/pdf' and any(kw in att_name for kw in PO_ATTACHMENT_NAME_KEYWORDS):
+                is_po_pdf_present = True
+                break
+
+    if is_po_pdf_present:
+        if not is_any_spec_sheet_present:
+            for pattern in PO_NUMBER_PATTERNS:
+                if re.search(pattern, content_to_search, re.IGNORECASE):
+                    return FOLDER_PURCHASE_ORDERS
+            for keyword in PO_SUBJECT_BODY_KEYWORDS:
+                if re.search(rf"\b{re.escape(keyword)}\b", content_to_search, re.IGNORECASE):
+                    return FOLDER_PURCHASE_ORDERS
+            if subject_lower.startswith("fw:") or subject_lower.startswith("fwd:"):
+                return FOLDER_PURCHASE_ORDERS
         else:
-            print(f"[{self.name}] Processed {len(results)} emails.")
-            return f"✅ Email sorting complete. Processed {len(results)} emails."
+            print("Spec sheet present; skipping PO classification.")
 
+    if detect_purchase_order_signals(subject_original, body_content, attachments):
+        return FOLDER_PURCHASE_ORDERS
 
-# --- Get Email Details Tool ---
+    if is_any_spec_sheet_present:
+        return FOLDER_QUOTE_REQUESTS
 
-class GetEmailDetailsToolSchema(BaseModel):
-    message_id: str = Field(description="The ID of the email message to fetch details for.")
+    for keyword in QUOTE_SUBJECT_BODY_KEYWORDS:
+        if re.search(rf"\b{re.escape(keyword)}\b", content_to_search, re.IGNORECASE):
+            return FOLDER_QUOTE_REQUESTS
 
+    return FOLDER_NEEDS_ATTENTION
 
-class GetEmailDetailsTool(BaseTool):
-    name: str = "Get Email Details Tool"
-    description: str = "Fetches sender, subject, body, and metadata for a given email message ID."
-    args_schema: type[BaseModel] = GetEmailDetailsToolSchema
+# ✅ Wrapper function required for import
+def process_emails():
+    processed_email_summaries = []
 
-    def _run(self, message_id: str) -> str:
-        print(f"[{self.name}] Fetching email details for ID: {message_id}")
-        try:
-            email_details_data = fetch_real_email_details(message_id=message_id)
+    inbox_id = "inbox"  # You could refactor this if needed
 
-            if not email_details_data:
-                error_message = f"Could not retrieve email ID '{message_id}'. It may not exist or an API error occurred."
-                print(f"[{self.name}] {error_message}")
-                return json.dumps({"error": error_message})
+    folder_ids = {
+        FOLDER_NEEDS_ATTENTION: get_folder_id(FOLDER_NEEDS_ATTENTION, parent_folder_id=inbox_id),
+        FOLDER_QUOTE_REQUESTS: get_folder_id(FOLDER_QUOTE_REQUESTS, parent_folder_id=inbox_id),
+        FOLDER_PURCHASE_ORDERS: get_folder_id(FOLDER_PURCHASE_ORDERS, parent_folder_id=inbox_id)
+    }
 
-            output_data = {
-                "original_message_id": email_details_data.get("id"),
-                "original_subject": email_details_data.get("subject"),
-                "full_original_body": email_details_data.get("consolidated_body"),
-                "reply_to_address": email_details_data.get("reply_to_address"),
-                "original_from_name": email_details_data.get("from_name"),
-                "original_from_address": email_details_data.get("from_address")
-            }
+    if not all(folder_ids.values()):
+        print("Exiting due to missing target folder(s).")
+        return processed_email_summaries
 
-            print(f"[{self.name}] Success. Returning email details.")
-            return json.dumps(output_data)
+    unread_emails = get_unread_emails(folder_id=inbox_id, top_n=20)
 
-        except Exception as e:
-            error_str = f"Error in {self.name}: {str(e)}"
-            print(f"[{self.name}] {error_str}")
-            return json.dumps({"error": error_str, "message_id": message_id})
+    if not unread_emails:
+        print("No unread emails to process.")
+        return processed_email_summaries
 
+    for email in unread_emails:
+        email_id = email.get('id')
+        subject = email.get('subject', '')
+        from_email = email.get('from', {}).get('emailAddress', {}).get('address', '')
+        attachments = get_email_attachments(email_id) if email.get('hasAttachments') else []
 
-# --- Draft and Log Email Tool ---
+        body = email.get('body', {}).get('content') or email.get('bodyPreview', '')
 
-class DraftAndLogEmailToolSchema(BaseModel):
-    original_message_id: str = Field(description="ID of the original email being replied to.")
-    recipient_email: str = Field(description="Email address of the recipient.")
-    draft_subject: str = Field(description="Subject line for the draft email.")
-    draft_body: str = Field(description="Body content for the draft email.")
+        category = categorize_email(email, attachments)
 
+        log_email_to_airtable(
+            email_id=email_id,
+            from_email=from_email,
+            email_subject=subject,
+            email_content=body,
+            email_attachments=attachments,
+            attachments_names=[att.get('name', '') for att in attachments],
+            attachments_types=[att.get('contentType', '') for att in attachments],
+            po_detected=(category == FOLDER_PURCHASE_ORDERS),
+            category=category,
+            status="Sorted",
+            reply_sent="No",
+            notes=""
+        )
 
-class DraftAndLogEmailTool(BaseTool):
-    name: str = "Draft and Log Email Tool"
-    description: str = "Simulates sending a drafted email and logs the draft output."
-    args_schema: type[BaseModel] = DraftAndLogEmailToolSchema
+        dest_folder_id = folder_ids.get(category)
+        if dest_folder_id:
+            print(f"Moving email ID {email_id} to '{category}'")
+            move_email(email_id, dest_folder_id)
+        else:
+            print(f"No destination folder ID found for '{category}'")
 
-    def _run(self, original_message_id: str, recipient_email: str, draft_subject: str, draft_body: str) -> str:
-        print(f"[{self.name}] Preparing to send draft to {recipient_email} with subject: {draft_subject}")
-        try:
-            if not all([original_message_id, recipient_email, draft_subject, draft_body]):
-                return json.dumps({
-                    "error": "Missing required fields: original_message_id, recipient_email, draft_subject, draft_body."
-                })
+        processed_email_summaries.append({
+            "id": email_id,
+            "subject": subject,
+            "category": category
+        })
 
-            confirmation_message = send_email_update(
-                subject_line=draft_subject,
-                body_content=draft_body,
-                recipient_email=recipient_email
-            )
-
-            log_output = {
-                "status": "✅ Draft processed and logged (simulated)",
-                "original_message_id": original_message_id,
-                "recipient_email": recipient_email,
-                "draft_subject": draft_subject,
-                "draft_body_preview": draft_body[:200] + "...",
-                "confirmation_from_send_email_update": confirmation_message
-            }
-
-            print(f"[{self.name}] Success. Logging output.")
-            return json.dumps(log_output)
-
-        except Exception as e:
-            error_str = f"Failed to process/log draft email: {str(e)}"
-            print(f"[{self.name}] {error_str}")
-            return json.dumps({"error": error_str})
+    print("Email processing finished.")
+    return processed_email_summaries
 
