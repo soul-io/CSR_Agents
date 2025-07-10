@@ -42,6 +42,11 @@ def log_email_to_airtable(
         return
 
     try:
+        # Guard against nulls
+        attachments_names = attachments_names or []
+        attachments_types = attachments_types or []
+        email_attachments = email_attachments or []
+
         # Sanitize and truncate fields
         def safe_str(val, max_len=1000):
             return str(val)[:max_len-3] + "..." if len(str(val)) > max_len else str(val)
@@ -50,7 +55,7 @@ def log_email_to_airtable(
             "Email_ID": safe_str(email_id),
             "From_Email": safe_str(from_email),
             "Email_Subject": safe_str(email_subject),
-            "Email_Content": safe_str(email_content),  # ← this comma was missing
+            "Email_Content": safe_str(email_content),
             "Email_Attachments": safe_str(
                 [att["filename"] for att in email_attachments]
             ) if isinstance(email_attachments, list) else safe_str(email_attachments),
@@ -63,12 +68,16 @@ def log_email_to_airtable(
             "Notes": safe_str(notes)
         }
 
+        print(f"🔄 Logging email: {email_subject}")
         print("📤 Final fields being sent to Airtable:")
         for key, value in fields.items():
             print(f"  {key}: {type(value)} → {str(value)[:100]}")
 
         airtable.insert(fields)
         print(f"✅ Logged email to Airtable: {email_subject}")
+
+    except Exception as e:
+        print(f"❌ Failed to log email to Airtable for subject '{email_subject}': {e}")
 
     except Exception as e:
         print(f"❌ Failed to log email to Airtable for subject '{email_subject}': {e}")
