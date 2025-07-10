@@ -150,7 +150,7 @@ def process_emails():
         dest_folder_id = folder_ids.get(category)
         if dest_folder_id:
             print(f"Moving email ID {email_id} to '{category}'")
-            move_email(email_id, dest_folder_id)  # Uncomment to enable actual move
+            move_email(email_id, dest_folder_id)
         else:
             print(f"No destination folder ID found for '{category}'")
 
