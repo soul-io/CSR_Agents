@@ -296,4 +296,3 @@ def _test_get_and_move_emails(target_folder_id_map):
         print("Move test part is currently commented out in the test function. Uncomment to test moving.")
     else:
         print("No unread emails in Inbox to test moving.")
-
