@@ -1,28 +1,67 @@
-from graph_helper import get_unread_emails # Only need this if we were to check before calling, but process_emails does it
-from email_sorter import process_emails # process_emails will handle fetching and all logic
-# from email_tools import DraftAndLogEmailTool # No longer used in this simplified version
-# from airtable_logger import log_email_to_airtable # process_emails calls airtable_logger directly
+import json
 
-def run_live_agent():
-    print("📬 Triggering batch email processing via email_sorter.process_emails()...")
-    
-    # Call process_emails from email_sorter.py once. 
-    # This function handles fetching, categorizing, logging, and moving emails in batch.
-    results = process_emails() 
+# Load test emails from local .json file
+def load_test_emails(filepath="test_emails.json"):
+    with open(filepath, "r") as f:
+        return json.load(f)
 
-    if results is None: 
-        print("⚠️ email_sorter.process_emails() did not return results or exited early (e.g., critical folder missing).")
-    elif not results: 
-        print("📭 No unread emails were processed by email_sorter.process_emails(), or no emails were found initially.")
+# Very basic RAG-like classification
+def classify_email(email_text):
+    text = email_text.lower()
+    if "purchase order" in text or "po-" in text:
+        return "Purchase Orders"
+    elif "quote" in text or "pricing" in text:
+        return "Quote Requests"
     else:
-        # Assuming process_emails now returns a list of processed item summaries (which the refactor aimed for)
-        # If the refactor of email_sorter.py failed, this part might not be accurate.
-        # For now, let's assume it might return a list if successful.
-        print(f"✅ email_sorter.process_emails() reported processing for {len(results)} email(s).")
-        # for result in results:
-        #     print(f"  - Processed Email ID: {result.get('id')}, Category: {result.get('category')}")
+        return "Needs Attention"
 
-    print("\n--- Live agent trigger run complete ---")
+# Draft reply based on classification
+def draft_reply(category, email_data):
+    sender = email_data["from"]
+    name = sender.split("@")[0].capitalize()
+
+    if category == "Purchase Orders":
+        subject = f"Re: {email_data['subject']}"
+        body = f"""Dear {name},
+
+Thank you for your Purchase Order. We have received it and will process it shortly. A formal order confirmation will follow.
+
+Best regards,
+The Clearline Team"""
+    elif category == "Quote Requests":
+        subject = f"Re: {email_data['subject']}"
+        body = f"""Hi {name},
+
+Thanks for your inquiry! We’re reviewing your quote request and will get back to you shortly with pricing and lead time.
+
+Cheers,
+The Clearline Team"""
+    else:
+        subject = f"Re: {email_data['subject']}"
+        body = f"""Hello {name},
+
+Thanks for reaching out. We’re reviewing your message and will get back to you shortly if action is needed.
+
+Sincerely,
+The Clearline Team"""
+
+    return subject, body
+
+# Logger
+def log_output(email_id, category, subject, body):
+    print("\n--- LOG ENTRY ---")
+    print(f"Email ID: {email_id}")
+    print(f"Category: {category}")
+    print(f"Draft Subject: {subject}")
+    print(f"Draft Body Preview: {body[:150]}...")
+
+# MVP runner
+def run_mvp():
+    emails = load_test_emails()
+    for email in emails:
+        category = classify_email(email["body"])
+        subject, body = draft_reply(category, email)
+        log_output(email["id"], category, subject, body)
 
 if __name__ == "__main__":
-    run_live_agent()
+    run_mvp()
