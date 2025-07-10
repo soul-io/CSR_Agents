@@ -3,7 +3,7 @@ import os
 from graph_helper import get_unread_emails, get_email_attachments
 from email_sorter import categorize_email # categorize_email is used by find_po_email_id
 from crewai import Crew, Task, Process
-from basic_agents import emailer_agent, email_drafting_agent # Corrected import
+from agents.basic_agents import emailer_agent, email_drafting_agent
 
 # Load environment variables
 load_dotenv()
