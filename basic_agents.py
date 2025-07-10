@@ -1,5 +1,5 @@
 from crewai import Agent
-from tools.email_tools import EmailSorterTool, GetEmailDetailsTool, DraftAndLogEmailTool
+from email_tools import EmailSorterTool, GetEmailDetailsTool, DraftAndLogEmailTool # Corrected import
 
 # Email classification agent
 emailer_agent = Agent(
