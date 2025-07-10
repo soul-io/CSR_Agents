@@ -2,29 +2,26 @@ from airtable import Airtable
 import os
 from dotenv import load_dotenv
 
-# Ensure environment variables are loaded at the start of this module
+# Load environment variables
 load_dotenv()
 
-# Airtable credentials and table config
+# Airtable credentials and config
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = "CSR_Log" # This is a string, so it's fine
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_PERSONAL_TOKEN")
 
 # Initialize Airtable client
-# This will likely still fail if the .env file is missing or keys are not set,
-# but the load_dotenv() call is in the right place now.
 airtable_client_initialized = False
 airtable = None
 if AIRTABLE_BASE_ID and AIRTABLE_TABLE_NAME and AIRTABLE_TOKEN:
     try:
         airtable = Airtable(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, api_key=AIRTABLE_TOKEN)
         airtable_client_initialized = True
-        print("Airtable client initialized successfully.")
+        print("✅ Airtable client initialized successfully.")
     except Exception as e:
         print(f"⚠️ Failed to initialize Airtable client: {e}. Logging to Airtable will be skipped.")
 else:
-    print("⚠️ Airtable credentials (AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, AIRTABLE_PERSONAL_TOKEN) not found in environment. Logging to Airtable will be skipped.")
-
+    print("⚠️ Airtable credentials not found in environment. Logging to Airtable will be skipped.")
 
 def log_email_to_airtable(
     email_id,
@@ -45,33 +42,33 @@ def log_email_to_airtable(
         return
 
     try:
+        # Sanitize and truncate fields
+        def safe_str(val, max_len=1000):
+            return str(val)[:max_len-3] + "..." if len(str(val)) > max_len else str(val)
+
         fields = {
-            "Email_ID": email_id,
-            "From_Email": from_email,
-            "Email_Subject": email_subject,
-            "Email_Content": email_content, # Consider truncating if very long
-            "Email_Attachments": str(email_attachments), # Could be too long, consider summarizing
-            "Attachments_Names": attachments_names, # This is a list, Airtable might prefer a string
-            "Attachments_Types": attachments_types, # This is a list, Airtable might prefer a string
-            "PO_Detected": po_detected,
-            "Category": category,
-            "Status": status,
-            "Reply_Sent": reply_sent,
-            "Notes": notes
+            "Email_ID": safe_str(email_id),
+            "From_Email": safe_str(from_email),
+            "Email_Subject": safe_str(email_subject),
+            "Email_Content": safe_str(email_content),  # ← this comma was missing
+            "Email_Attachments": safe_str(
+                [att["filename"] for att in email_attachments]
+            ) if isinstance(email_attachments, list) else safe_str(email_attachments),
+            "Attachments_Names": ", ".join(map(str, attachments_names)) if isinstance(attachments_names, list) else safe_str(attachments_names),
+            "Attachments_Types": ", ".join(map(str, attachments_types)) if isinstance(attachments_types, list) else safe_str(attachments_types),
+            "PO_Detected": bool(po_detected),
+            "Category": safe_str(category),
+            "Status": safe_str(status),
+            "Reply_Sent": bool(reply_sent),
+            "Notes": safe_str(notes)
         }
 
-        # Convert lists to comma-separated strings if Airtable field is not multi-select/linked record
-        if isinstance(fields["Attachments_Names"], list):
-            fields["Attachments_Names"] = ", ".join(fields["Attachments_Names"])
-        if isinstance(fields["Attachments_Types"], list):
-            fields["Attachments_Types"] = ", ".join(fields["Attachments_Types"])
-        if len(fields["Email_Content"]) > 1000: # Example truncation
-            fields["Email_Content"] = fields["Email_Content"][:997] + "..."
-        if len(fields["Email_Attachments"]) > 1000:
-            fields["Email_Attachments"] = fields["Email_Attachments"][:997] + "..."
-
+        print("📤 Final fields being sent to Airtable:")
+        for key, value in fields.items():
+            print(f"  {key}: {type(value)} → {str(value)[:100]}")
 
         airtable.insert(fields)
         print(f"✅ Logged email to Airtable: {email_subject}")
+
     except Exception as e:
         print(f"❌ Failed to log email to Airtable for subject '{email_subject}': {e}")
